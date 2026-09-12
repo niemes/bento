@@ -12,6 +12,7 @@
 import type { BentoDoc } from './model'
 import { signText, syncHost } from '../../kernel/src/sync/online.ts'
 import { lsGet, lsSet } from '../../kernel/src/storage.ts'
+import { netWebSocket } from '../../kernel/src/net.ts'
 
 // Two helpers the transport used to share with the collab code in the same
 // file. Kept local rather than exported from the kernel: they are a dozen
@@ -106,7 +107,12 @@ export class BroadcastSocket {
       const url = this.pub
         ? `${this.room}?tok=${this.tok}&w=${this.pub}&since=0`
         : `${this.room}?tok=${this.tok}&since=0`
-      ws = new WebSocket(url)
+      // Through the one chokepoint, never a raw WebSocket: the offline switch
+      // is a privacy promise ("nothing leaves this computer") and net.ts is
+      // the only place that keeps it. A viewer who flipped it stays offline
+      // even with a broadcast copy open; netWebSocket throws OfflineError,
+      // caught below like any other failure to connect.
+      ws = netWebSocket(url)
     } catch {
       this.retry()
       return
