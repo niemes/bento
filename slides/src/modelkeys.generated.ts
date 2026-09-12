@@ -10,7 +10,7 @@
 // a typo just means the styling does not apply.
 
 export const MODEL_KEYS = {
-    "doc": ["assets", "blobs", "collab", "docId", "fonts", "format", "layouts", "meta", "modified", "present", "readonly", "size", "slides", "template", "theme", "title", "version"],
+    "doc": ["assets", "blobs", "broadcast", "collab", "docId", "fonts", "format", "layouts", "meta", "modified", "present", "readonly", "size", "slides", "template", "theme", "title", "version"],
     "slide": ["background", "comments", "elements", "hidden", "hover", "id", "name", "notes", "stateOf", "themeRefs", "transition"],
     "comment": ["at", "author", "elementId", "id", "replies", "resolved", "text", "x", "y"],
     "element": {
