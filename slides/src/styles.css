@@ -1343,7 +1343,7 @@ a.ed-btn { text-decoration: none; }  /* the update block's "What's new" link is 
   box-shadow: 0 12px 32px rgb(15 23 36 / 0.18);
   padding: 12px 14px;
   max-width: 420px;
-  max-height: 70vh;
+  max-height: calc(100vh - 16px);
   overflow-y: auto;
 }
 .ed-layoutpick-title {

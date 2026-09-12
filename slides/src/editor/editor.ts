@@ -1755,17 +1755,15 @@ export class Editor {
       }
       pick.appendChild(grid)
     }
+    // Open beside the anchor, clamped on-screen. The bottom-of-sidebar button
+    // used to open the picker upward from itself, which pushed a picker with
+    // a handful of custom layouts above the viewport (measured: top = -7px at
+    // a 600px-tall window). The height is read after appending so the clamp
+    // uses the real box; the stylesheet caps it to the viewport and scrolls.
     const r = anchor.getBoundingClientRect()
-    if (anchor.classList.contains('ed-add-slide')) {
-      // bottom-of-sidebar button: open upward from it
-      pick.style.left = `${Math.max(8, r.left)}px`
-      pick.style.bottom = `${window.innerHeight - r.top + 8}px`
-    } else {
-      // insert-gap or panel button: open beside the anchor, clamped on-screen
-      pick.style.left = `${Math.max(8, Math.min(r.right + 10, window.innerWidth - 440))}px`
-      pick.style.top = `${Math.max(8, Math.min(r.top - 40, window.innerHeight - 460))}px`
-    }
+    pick.style.left = `${Math.max(8, Math.min(r.right + 10, window.innerWidth - 440))}px`
     document.body.appendChild(pick)
+    pick.style.top = `${Math.max(8, Math.min(r.top - 40, window.innerHeight - pick.offsetHeight - 8))}px`
     const close = (ev: PointerEvent) => {
       if (!pick.contains(ev.target as Node)) {
         pick.remove()
