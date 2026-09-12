@@ -110,7 +110,7 @@ free — same pattern as every other export). The file *is* the viewer; no
 hosting, no site generation.
 
 **The mode marker is additive**: the copy embeds
-`doc.collab.broadcast = { room, relay }` — nothing in the format changes for
+`doc.broadcast = { room, relay }` — nothing in the format changes for
 existing files, and old shells ignore the unknown field. The current shell
 checks for it at boot: if present → **broadcast-viewer mode** (below), and
 the editor never mounts. The copy sets `collab.on:false` explicitly (legacy
@@ -155,7 +155,7 @@ material edits.
 
 ## Broadcast client (the copy's runtime)
 
-Boot: `doc.collab.broadcast` present → **broadcast-viewer mode** — the full
+Boot: `doc.broadcast` present → **broadcast-viewer mode** — the full
 present overlay (real Reveal, morphs, fx, the entire renderer) on the embedded
 document, with no editor, no autosave, no collab session, no Save path.
 
@@ -209,7 +209,7 @@ as the deck is edited. Full design: `docs/hosted-broadcast-design.md`.
 
 ## Verification
 
-- **Relay**: `npx wrangler dev --port 8787` + `scripts/test-nav.mjs` (Node's
+- **Relay**: `npx wrangler dev --port 8787` + `server/sync-worker/nav-check.mjs` (Node's
   built-in WebSocket, no deps): mints a key, connects presenter + viewer
   sockets, asserts unsigned/forged/member-key frames dropped, valid frames
   fanned out, `lastNav` replayed ahead of any live frame, presence rises on

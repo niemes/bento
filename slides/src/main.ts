@@ -7,16 +7,19 @@ import './styles.css'
 import { anim } from './anim'
 import { configureApp, appConfig } from '../../kernel/src/app.ts'
 import { startTheme } from '../../kernel/src/theme.ts'
+import { startNetGuard } from '../../kernel/src/net.ts'
 import {
   capturePristine, readEmbeddedDoc, serializeFile, serializeAuto, downloadFile,
   suggestedFileName, parseEnvelope, decryptEnvelope, setEncryptionPassword,
-  registerPreview,
+  registerPreview, canWriteInPlace, hostCan,
 } from './save'
+import { maybeShowReturnGate } from './editor/returngate'
 import { buildSlidePreview } from './preview'
 import { APP_VERSION, checkForUpdates, buildUpdatedFile, applyUpdate } from './update'
 import { i18nApi, t, applyDirection } from './i18n'
 import { parseDoc, type BentoDoc, type TextElement } from './model'
 import { validateDoc, type ValidateOpts } from './validate'
+import { resolveThemeRefs } from './palette'
 import { measureText, measureElement, type TextMeasureSpec } from './measure'
 import { starterDoc } from './starterdeck'
 import { injectFonts } from './fonts'
@@ -24,7 +27,8 @@ import { Store } from './store'
 import { Editor } from './editor/editor'
 import { startPresentation } from './present'
 import { SyncSession } from './sync/session'
-import { onlineTransport, startSharing, stopSharing, disconnectOnline, BroadcastSocket, broadcastTok, syncHost, joinFromDoc } from './sync/online'
+import { onlineTransport, startSharing, stopSharing, disconnectOnline, syncHost, joinFromDoc } from './sync/online'
+import { BroadcastSocket, broadcastTok } from './broadcast'
 
 // Tell the kernel who this app is — must precede any kernel module use
 // (window title suffix, save-picker label, update manifest + its `app` check).
@@ -54,6 +58,11 @@ capturePristine()
 // lays anything out — it sets two attributes on the root element.
 startTheme()
 
+// Watch the offline switch in OTHER tabs. `storage` fires only in the tabs
+// that did not make the change — which is precisely the set that has an open
+// socket it does not yet know to close (GHSA-5c3x-xqp6-g94r).
+startNetGuard()
+
 // Chrome direction follows the VIEWER's language (Arabic/Hebrew/… get an RTL
 // interface). Deliberately AFTER capturePristine: saves re-serialize the
 // pristine clone, so the dir/lang attributes never reach a saved file — the
@@ -68,7 +77,11 @@ const envelope = embedded ? parseEnvelope(embedded) : null
 if (envelope) {
   void passwordGate()
 } else {
-  bootWith((embedded && parseDoc(embedded)) || starterDoc())
+  const parsed = embedded ? parseDoc(embedded) : null
+  // Whether this is OUR starter or someone's document is knowable only here —
+  // downstream the two are indistinguishable, and the difference is what stops
+  // the return gate appearing over real work.
+  bootWith(parsed || starterDoc(), !parsed)
 }
 
 /** Encrypted file: ask for the password (looping on failure), then boot. */
@@ -113,10 +126,17 @@ async function passwordGate() {
   input.focus()
 }
 
-function bootWith(doc: BentoDoc) {
-  if (doc.collab?.broadcast) void broadcastMode(doc)
+function bootWith(doc: BentoDoc, docIsFresh = false) {
+  // Derive palette-referenced colours once before anything renders. A file
+  // saved by this app already carries correct literals, so this is normally a
+  // no-op — it matters for a document whose JSON was written by hand or by an
+  // agent, where the refs may be right and the literals stale. Editing later
+  // re-derives through the editor's `doc` hook; nothing else would visit a
+  // player file at all.
+  resolveThemeRefs(doc)
+  if (doc.broadcast) void broadcastMode(doc)
   else if (doc.readonly) playerMode(doc)
-  else editorMode(doc)
+  else editorMode(doc, docIsFresh)
 }
 
 /**
@@ -132,7 +152,7 @@ async function broadcastMode(doc: BentoDoc) {
   // The broadcast copy carries only the room name and relay — the connect
   // token is DERIVED from the room name (broadcastTok), so the file never
   // embeds a secret.
-  let creds = doc.collab!.broadcast!
+  let creds = doc.broadcast!
   const relay = (creds.relay ?? syncHost()).replace(/\/+$/, '')
   // ?room=<name> re-points this copy at another broadcaster's room on the
   // SAME relay — the hosted-client flow: any presenter's deck mints this
@@ -151,7 +171,7 @@ async function broadcastMode(doc: BentoDoc) {
   let viewers = 0
   let firstNav = false
   let exited = false
-  let lastState: import('./sync/online').BroadcastSocketState = 'connecting'
+  let lastState: import('./broadcast').BroadcastSocketState = 'connecting'
 
   const chip = document.createElement('div')
   chip.className = 'bento-broadcast-chip'
@@ -248,7 +268,10 @@ async function broadcastMode(doc: BentoDoc) {
           const cur = deck.getIndices().h
           const section = slidesEl.children[cur] as HTMLElement | undefined
           const slide = doc.slides[cur]
-          if (section && slide) section.replaceChildren(buildSection(slide))
+          // The CONTENTS of a fresh section, not the section itself: a
+          // <section> nested inside a <section> is a vertical slide to Reveal,
+          // and the next arrow would descend into it instead of advancing.
+          if (section && slide) section.replaceChildren(...buildSection(slide, cur).childNodes)
         }
       }
       unsubscribeDoc = liveStore?.on('doc', applyDoc) ?? null
@@ -321,7 +344,7 @@ function playerMode(doc: BentoDoc) {
   start()
 }
 
-function editorMode(doc: BentoDoc) {
+function editorMode(doc: BentoDoc, docIsFresh = false) {
 
 document.title = `${doc.title} — ${appConfig().appName}`
 
@@ -331,6 +354,11 @@ if (doc.fonts?.length) injectFonts(doc)
 
 const store = new Store(doc)
 const editor = new Editor(document.getElementById('app')!, store)
+
+// A returning visitor who saved from this origin before is told so, rather
+// than handed a silent blank starter that reads as lost work. No-ops off the
+// web, for a first-time visitor, and over any real document.
+maybeShowReturnGate({ docIsFresh, fsAccess: canWriteInPlace(), canWrite: hostCan('write') })
 
 // Live collaboration (bento-sync): same-machine tabs sync automatically over
 // BroadcastChannel; the online relay transport joins via the Share UI.
@@ -387,7 +415,8 @@ if (location.hash === '#present') {
     transports: () => session.transportKinds,
     /** start an online session (mints doc.collab, connects the relay) */
     share: () => {
-      void startSharing(session, store)
+      // same guard as editor.goLive(): a broadcast copy never mints a session
+      if (!store.doc.broadcast) void startSharing(session, store)
       return store.doc.collab
     },
     unshare: () => stopSharing(session, store),

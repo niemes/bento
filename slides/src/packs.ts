@@ -22,6 +22,7 @@ import { appConfig } from '../../kernel/src/app.ts'
 import { addPack, removePack, type LanguagePack } from '../../kernel/src/i18n.ts'
 import { readShellBlocks, type ShellBlock } from '../../kernel/src/save.ts'
 import { fetchPinned, verifySigned } from '../../kernel/src/update.ts'
+import { netFetch } from '../../kernel/src/net.ts'
 // Extension-explicit like the kernel imports above, so this module also loads
 // under plain node — scripts/test-packs.ts exercises the real thing.
 import { PACKED } from './i18n/packed.ts'
@@ -51,6 +52,43 @@ export interface PackListing {
 
 export type PackError = 'offline' | 'bad-pack' | 'wrong-app' | 'unverified'
 
+/**
+ * Locale codes that must resolve to a pack filed under a DIFFERENT code.
+ *
+ * The bundled catalogs already have this (the `alias` map in
+ * slides/src/i18n.ts: zh-CN → zh-Hans, pt-BR → pt); packs need it for the
+ * same reason. A pack's language code is what kernel `resolve()` matches
+ * navigator.language against — exactly, then by base language — so a pack
+ * filed under a code no browser reports is a pack nobody can ever be given.
+ *
+ * `tl` → `fil` is that case: ISO 639-1 has `tl` for Tagalog, but browsers,
+ * Android, iOS and macOS all report Filipino as `fil` / `fil-PH`. The pack is
+ * therefore filed as `fil`, and `tl` stays reachable here for any system that
+ * does report it (a Linux box with LANG=tl_PH) and for files saved carrying
+ * the pack under its old code.
+ *
+ * Registered WITHOUT a label, so an alias never shows as a second entry in
+ * the language picker.
+ *
+ * Both directions are listed on purpose: `fil: ['tl']` is the live case, and
+ * `tl: ['fil']` makes a file saved carrying the pack under its OLD code still
+ * answer the `fil-PH` that a browser actually reports.
+ */
+const ALIASES: Record<string, readonly string[]> = { fil: ['tl'], tl: ['fil'] }
+
+/** Register a pack under its own code and under every alias of it. */
+function register(pack: LanguagePack): boolean {
+  if (!addPack(pack, 'slides')) return false
+  for (const alias of ALIASES[pack.lang] ?? []) addPack({ ...pack, lang: alias, label: undefined }, 'slides')
+  return true
+}
+
+/** Undo `register` — the aliases go with the pack that created them. */
+function unregister(lang: string): void {
+  for (const alias of ALIASES[lang] ?? []) removePack(alias)
+  removePack(lang)
+}
+
 /** The block type carrying a pack inside a saved shell. */
 export const PACK_BLOCK_TYPE = 'application/bento+lang'
 const blockId = (lang: string) => `bento-lang-${lang}`
@@ -78,7 +116,7 @@ export function readPacksFromShell(): number {
   for (const { body } of readShellBlocks(PACK_BLOCK_TYPE)) {
     try {
       const pack = JSON.parse(body) as LanguagePack
-      if (pack?.lang && pack.strings && addPack(pack, 'slides')) {
+      if (pack?.lang && pack.strings && register(pack)) {
         inFile.set(pack.lang, pack)
         n++
       }
@@ -138,7 +176,7 @@ export async function fetchPack(listing: PackListing): Promise<LanguagePack | Pa
     // offline / it isn't published" from "those bytes are not the pack we
     // were promised". Either way nothing unverified is returned.
     try {
-      return (await fetch(url, { cache: 'no-store', method: 'HEAD' })).ok ? 'unverified' : 'offline'
+      return (await netFetch(url, { cache: 'no-store', method: 'HEAD' })).ok ? 'unverified' : 'offline'
     } catch {
       return 'offline'
     }
@@ -165,7 +203,7 @@ export async function fetchPack(listing: PackListing): Promise<LanguagePack | Pa
  */
 export function stageForFile(pack: LanguagePack): boolean {
   if (!pack?.lang || !pack.strings) return false
-  if (!addPack(pack, 'slides')) return false
+  if (!register(pack)) return false
   inFile.set(pack.lang, pack)
   pending.add(pack.lang)
   return true
@@ -176,7 +214,7 @@ export function unstageFromFile(lang: string): boolean {
   if (!inFile.has(lang)) return false
   inFile.delete(lang)
   pending.add(lang)
-  removePack(lang)
+  unregister(lang)
   return true
 }
 
@@ -227,7 +265,7 @@ export function shellBlocksForPacks(): ShellBlock[] {
  */
 async function fetchIndex(): Promise<PackListing[]> {
   try {
-    const res = await fetch(`${channel()}/packs.json`, { cache: 'no-store' })
+    const res = await netFetch(`${channel()}/packs.json`, { cache: 'no-store' })
     if (!res.ok) return []
     const payload = (await verifySigned(await res.text(), 'language pack index')) as {
       app?: unknown
@@ -293,7 +331,7 @@ export async function refreshPacksForVersion(version: string): Promise<{ refresh
     // a channel still serving the old pack should leave the file untouched.
     if (got.version && version && got.version !== version) { kept.push(lang); continue }
     inFile.set(lang, got)
-    addPack(got, 'slides')
+    register(got)
     refreshed.push(lang)
   }
   return { refreshed, kept }
