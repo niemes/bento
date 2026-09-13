@@ -33,6 +33,7 @@
 // that stays green with the boundary removed is checking nothing.
 
 import { AUDIENCE_HIDDEN, projectDoc, projectOp, carriesHidden } from '../slides/src/audience.ts'
+import { SyncState } from '../slides/src/sync/crdt.ts'
 import type { BentoDoc, Slide } from '../slides/src/model.ts'
 import type { Op } from '../kernel/src/sync/crdt.ts'
 
@@ -102,7 +103,7 @@ const c = aud.collab!
 ok(c.room === 'wROOM', 'same room')
 ok(c.key === SHOW_KEY, 'collab.key IS the show key')
 ok(c.key !== ROOM_KEY && JSON.stringify(aud).indexOf(ROOM_KEY) === -1, 'the room key appears nowhere in the audience copy')
-ok(c.role === 'reader', 'boots through the read-only path')
+ok((c.role as string) === 'audience', 'role is the distinct, client-visible \'audience\' (never \'reader\': every reader check would join the room path)')
 ok(c.invite?.role === 'audience' && c.invite.pub === 'AUDPUB', 'the invite is the audience one')
 ok(c.ownerPriv === undefined && c.writerPriv === undefined, 'no private halves')
 ok((c as { audience?: unknown }).audience === undefined, 'the presenter\'s ticket store does not travel')
@@ -141,6 +142,63 @@ const batch = [setBg, setNotes, setEl, setComments, docSet]
 const streamed = batch.map(projectOp).filter((o): o is Op => o !== null)
 ok(streamed.length === 3 && streamed.every((o) => (o as { k?: string }).k !== 'notes' && (o as { k?: string }).k !== 'comments'),
   'a mixed batch streams without its notes/comments ops and with nothing else changed')
+
+// ---------------------------------------------------------------------------
+// Engine-driven: ask the CRDT which op shapes each hidden-carrying edit
+// actually produces, rather than trusting hand-built ops. Content-agnostic —
+// a SENTINEL string is planted in every hidden field the edit touches and the
+// projected wire must never contain it, while a VISIBLE marker planted in a
+// public field must arrive (so an empty stream cannot pass). This is what
+// caught `layouts`: the engine diffs doc.layouts as ONE whole-value register,
+// which no slide-scoped rule saw (security, 2026-09-13).
+console.log('\nengine-driven — every hidden-carrying edit the editor can make\n')
+const SENTINEL = 'ZZ-HIDDEN-SENTINEL-ZZ'
+const VISIBLE = 'ZZ-VISIBLE-MARKER-ZZ'
+function baseDoc(): BentoDoc {
+  return {
+    format: 'bento/slides', version: 1, docId: 'd', title: 't',
+    size: { width: 1280, height: 720 },
+    theme: { background: '#fff', color: '#000', accent: '#f00', fontFamily: 'sans' },
+    slides: [
+      slide({ id: 'p1', elements: [{ id: 'e1', type: 'text', x: 0, y: 0, w: 10, h: 10, html: 'hello' } as never] }),
+      slide({ id: 'p2' }),
+    ],
+    layouts: [slide({ id: 'l1', name: 'L' })],
+    assets: {},
+  } as unknown as BentoDoc
+}
+function driven(name: string, edit: (d: BentoDoc) => void, expectVisible = true) {
+  const before = baseDoc()
+  const engine = new SyncState('presenter')
+  engine.adopt(before)
+  const after: BentoDoc = JSON.parse(JSON.stringify(before))
+  edit(after)
+  const ops = engine.diff(before, after, { text: true })
+  ok(ops.length > 0, `${name}: the engine minted ${ops.length} op(s)`)
+  const wire = JSON.stringify(ops.map(projectOp).filter((o) => o !== null))
+  ok(!wire.includes(SENTINEL), `${name}: the sentinel never reaches the wire`)
+  if (expectVisible) ok(wire.includes(VISIBLE), `${name}: the visible edit in the same batch DOES arrive`)
+  ok(JSON.stringify(ops).includes(SENTINEL), `${name}: (control) the unprojected ops did carry the sentinel`)
+}
+driven('edit speaker notes', (d) => { d.slides[0].notes = SENTINEL; d.slides[0].background = VISIBLE })
+driven('add a comment with a reply', (d) => {
+  d.slides[0].comments = [{ ...comment, text: SENTINEL, replies: [{ id: 'r', author: 'B', text: SENTINEL, at: comment.at }] }]
+  d.slides[0].background = VISIBLE
+})
+driven('duplicate a slide that has notes', (d) => {
+  d.slides.push(slide({ id: 'p3', notes: SENTINEL, comments: [{ ...comment, text: SENTINEL }], background: VISIBLE }))
+})
+driven('new interactive state from a slide with notes', (d) => {
+  d.slides.splice(1, 0, slide({ id: 'p1b', stateOf: 'p1', notes: SENTINEL, background: VISIBLE }))
+})
+driven('save slide as layout (doc-level register)', (d) => {
+  d.layouts!.push(slide({ id: 'l2', name: VISIBLE, notes: SENTINEL, comments: [{ ...comment, text: SENTINEL }] }))
+})
+driven('edit an existing layout\'s notes', (d) => { d.layouts![0].notes = SENTINEL; d.layouts![0].name = VISIBLE })
+driven('sync a state from its parent (content + notes together)', (d) => {
+  d.slides.push(slide({ id: 'p1c', stateOf: 'p1', notes: SENTINEL, elements: [{ id: 'e1', type: 'text', x: 0, y: 0, w: 10, h: 10, html: VISIBLE } as never] }))
+})
+driven('replace the whole layouts list', (d) => { d.layouts = [slide({ id: 'l9', name: VISIBLE, notes: SENTINEL })] })
 
 console.log(`\n${checks - failures}/${checks} checks passed${MUTATE ? ' (MUTATED — this run must be red)' : ''}`)
 process.exit(failures ? 1 : 0)

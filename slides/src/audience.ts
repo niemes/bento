@@ -40,6 +40,17 @@ import type { Op } from '../../kernel/src/sync/crdt'
  *  only in the format; elements carry neither field. */
 export const AUDIENCE_HIDDEN: readonly (keyof Slide)[] = ['notes', 'comments']
 
+/**
+ * Document-level keys whose VALUE is a list of slide-shaped objects. The CRDT
+ * diffs these as one whole-value register (`set k=layouts v=[...]`), not as
+ * slide nodes, so a projection that only looked at slide-scoped ops let
+ * "Save slide as layout" mid-show stream the layout's notes and comments —
+ * found by security driving the real engine (2026-09-13). The rule this
+ * encodes: every place `projectDoc` projects, `projectOp` must project the op
+ * that carries the same content.
+ */
+export const AUDIENCE_SLIDE_LISTS: readonly string[] = ['layouts']
+
 /** The ticket half that lives in the audience file's `collab`. */
 export type AudienceTicket = {
   /** owner-signed invite with role 'audience' — the relay admits on the chain */
@@ -81,7 +92,10 @@ export function projectDoc(doc: BentoDoc, ticket: AudienceTicket): { doc: BentoD
   if (!src) throw new Error('projectDoc: the presenter deck has no collab block')
   const copy: BentoDoc = JSON.parse(JSON.stringify(doc))
   copy.slides = copy.slides.map(projectSlide)
-  if (copy.layouts) copy.layouts = copy.layouts.map(projectSlide)
+  for (const k of AUDIENCE_SLIDE_LISTS) {
+    const list = (copy as unknown as Record<string, unknown>)[k]
+    if (Array.isArray(list)) (copy as unknown as Record<string, unknown>)[k] = list.map((x) => projectSlide(x as Slide))
+  }
   const missingAssets: string[] = []
   if (copy.blobs) {
     for (const k of Object.keys(copy.blobs)) if (!copy.assets?.[k]) missingAssets.push(k)
@@ -93,7 +107,12 @@ export function projectDoc(doc: BentoDoc, ticket: AudienceTicket): { doc: BentoD
     room: src.room,
     key: ticket.key,
     on: true,
-    role: 'reader',
+    // A distinct, client-visible role (security, 2026-09-13): every existing
+    // check that reads collab.role would otherwise do READER things — join the
+    // room on the room path, boot the locked editor, skip autosave — and the
+    // audience boot path is the show, not the editor. The kernel's role union
+    // widens with the session change; slides casts at this one site until then.
+    role: 'audience' as unknown as 'reader',
     ...(src.v !== undefined ? { v: src.v } : {}),
     ...(src.owner !== undefined ? { owner: src.owner } : {}),
     ...(src.writerPub !== undefined ? { writerPub: src.writerPub } : {}),
@@ -109,6 +128,8 @@ export function projectDoc(doc: BentoDoc, ticket: AudienceTicket): { doc: BentoD
  *
  * - a `set` of a hidden key on a slide node → null (the audience never learns
  *   the notes changed, let alone what to)
+ * - a doc-level `set` of a slide-shaped list (`layouts`) → the same op with
+ *   every entry projected
  * - an `ins` of a slide → the same op with the inserted node projected (the
  *   slide must still arrive — minus its notes and comments)
  * - everything else → unchanged. Element ops carry no hidden field; slide
@@ -117,6 +138,11 @@ export function projectDoc(doc: BentoDoc, ticket: AudienceTicket): { doc: BentoD
 export function projectOp(op: Op): Op | null {
   if (op.op === 'set' && op.sl !== undefined && op.el === undefined
       && (AUDIENCE_HIDDEN as readonly string[]).includes(op.k)) return null
+  // a doc-level whole-value register carrying slide-shaped objects (layouts)
+  if (op.op === 'set' && op.sl === undefined && op.el === undefined
+      && AUDIENCE_SLIDE_LISTS.includes(op.k) && Array.isArray(op.v)) {
+    return { ...op, v: (op.v as Slide[]).map(projectSlide) }
+  }
   if (op.op === 'ins' && op.kind === 'slide') return { ...op, node: projectSlide(op.node as Slide) }
   return op
 }
@@ -126,12 +152,13 @@ export function projectOp(op: Op): Op | null {
 export function carriesHidden(doc: BentoDoc): string[] {
   const hits: string[] = []
   const all = [...doc.slides, ...(doc.layouts ?? [])]
+  const c = doc.collab
+  if (c && (c.role as string) !== 'audience') hits.push(`collab.role(${c.role})`)
   for (const s of all) {
     if (s.notes) hits.push(`${s.id}.notes`)
     if ((s as { comments?: unknown }).comments !== undefined) hits.push(`${s.id}.comments`)
   }
   if (doc.blobs) hits.push('blobs')
-  const c = doc.collab
   if (c?.ownerPriv) hits.push('collab.ownerPriv')
   if (c?.writerPriv) hits.push('collab.writerPriv')
   if (c?.invite && (c.invite.role as string) !== 'audience') hits.push(`collab.invite(${c.invite.role})`)
