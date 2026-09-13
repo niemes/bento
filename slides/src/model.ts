@@ -576,7 +576,7 @@ export interface BentoDoc {
     writerPub?: string
     writerPriv?: string
     /** 'reader' = this copy is a live viewer: receives updates, never sends. */
-    role?: 'writer' | 'reader'
+    role?: 'writer' | 'reader' | 'audience'
     /**
      * Fine-grained access (v1.0.3+, `v: 2`): per-person keys. The room id
      * commits to the OWNER's pubkey. A member copy carries an INVITE — an
@@ -593,10 +593,8 @@ export interface BentoDoc {
       priv: string
       /** 'audience' (live broadcast) admits a receive-only socket for the
        *  duration of a show; it travels only in audience copies, whose `key`
-       *  is the show key rather than the room key (see src/audience.ts).
-       *  The kernel's CollabInvite widens to it with the session change that
-       *  streams the show; until then src/audience.ts casts. */
-      role: 'writer' | 'commenter'
+       *  is the show key rather than the room key (see src/audience.ts). */
+      role: 'writer' | 'commenter' | 'audience'
       /** unix ms expiry; 0/absent = no expiry */
       exp?: number
       /** owner's signature over `inv.${pub}.${role}.${exp||0}` */

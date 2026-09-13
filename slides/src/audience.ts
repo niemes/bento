@@ -110,15 +110,12 @@ export function projectDoc(doc: BentoDoc, ticket: AudienceTicket): { doc: BentoD
     // A distinct, client-visible role (security, 2026-09-13): every existing
     // check that reads collab.role would otherwise do READER things — join the
     // room on the room path, boot the locked editor, skip autosave — and the
-    // audience boot path is the show, not the editor. The kernel's role union
-    // widens with the session change; slides casts at this one site until then.
-    role: 'audience' as unknown as 'reader',
+    // audience boot path is the show, not the editor.
+    role: 'audience',
     ...(src.v !== undefined ? { v: src.v } : {}),
     ...(src.owner !== undefined ? { owner: src.owner } : {}),
     ...(src.writerPub !== undefined ? { writerPub: src.writerPub } : {}),
-    // role 'audience' — the kernel's CollabInvite union widens to it with the
-    // session change that streams the show; the relay already admits it.
-    invite: ticket.invite as unknown as NonNullable<BentoDoc['collab']>['invite'],
+    invite: ticket.invite,
   }
   return { doc: copy, missingAssets }
 }
@@ -153,7 +150,7 @@ export function carriesHidden(doc: BentoDoc): string[] {
   const hits: string[] = []
   const all = [...doc.slides, ...(doc.layouts ?? [])]
   const c = doc.collab
-  if (c && (c.role as string) !== 'audience') hits.push(`collab.role(${c.role})`)
+  if (c && c.role !== 'audience') hits.push(`collab.role(${c.role})`)
   for (const s of all) {
     if (s.notes) hits.push(`${s.id}.notes`)
     if ((s as { comments?: unknown }).comments !== undefined) hits.push(`${s.id}.comments`)
@@ -161,6 +158,6 @@ export function carriesHidden(doc: BentoDoc): string[] {
   if (doc.blobs) hits.push('blobs')
   if (c?.ownerPriv) hits.push('collab.ownerPriv')
   if (c?.writerPriv) hits.push('collab.writerPriv')
-  if (c?.invite && (c.invite.role as string) !== 'audience') hits.push(`collab.invite(${c.invite.role})`)
+  if (c?.invite && c.invite.role !== 'audience') hits.push(`collab.invite(${c.invite.role})`)
   return hits
 }

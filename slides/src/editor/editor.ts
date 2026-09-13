@@ -975,9 +975,7 @@ export class Editor {
     const c = this.store.doc.collab
     if (!(c?.room && c.key && c.v === 2 && c.ownerPriv)) return null
     if (c.audience) return c.audience
-    // role 'audience' — the kernel's invite role union widens with the session
-    // change that streams the show; the relay already admits it (#453).
-    const invite = await mintInvite(c.ownerPriv, 'audience' as 'writer')
+    const invite = await mintInvite(c.ownerPriv, 'audience')
     const ticket: AudienceTicket = { invite: { ...invite, role: 'audience' }, key: mintRoomKey() }
     this.store.commit(() => { this.store.doc.collab!.audience = ticket })
     return ticket
@@ -1459,7 +1457,7 @@ export class Editor {
     if (!this.session || offlineEnabled()) return
     // An audience copy holds the SHOW key, not the room key, and must never
     // mint or join a session of its own — its only path is the show (main.ts).
-    if ((this.store.doc.collab?.role as string) === 'audience') return
+    if (this.store.doc.collab?.role === 'audience') return
     this.session.enableSharing()
     await startSharing(this.session, this.store)
     this.wireOnlineStatus()
