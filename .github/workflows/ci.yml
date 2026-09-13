@@ -892,6 +892,15 @@ jobs:
             --outfile="$RUNNER_TEMP/test-sync-vouch.mjs"
           node "$RUNNER_TEMP/test-sync-vouch.mjs"
 
+      - name: session broadcast surface rig
+        # startShow/endShow, the verb channel, and the audience's reception.
+        # What breaks silently if it regresses: the audsnap under the show key
+        # is the LIVE sync state instead of a fresh adopt of the projected doc,
+        # which leaks `stash` (deleted slides' notes) and the whole per-keystroke
+        # text history past the projection; or a local op reaches the audience
+        # without the app's projection applied. Both are mutation-caught here.
+        run: node scripts/test-sync-show.ts
+
       - name: dash validator rig
         # 109 checks over the shapes that read as DATA rather than as damage —
         # a column shorter than the sheet has rows, a dictionary index past the
