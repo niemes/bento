@@ -6489,3 +6489,57 @@ Deploy: after #452's relay (deployed 2026-09-13 as `62a12ffa`, from
 `ivr=audience` or `s:'aud'`, and `v`/`bc` on `ready` are ignored by clients
 that do not read them. The client half (slides) feature-detects and lands
 separately. Design note: private until the client ships, then promoted.
+
+## 2026-09-13 — Broadcast: the client half is a projection, a ticket, and two toggles
+
+The relay half is the entry above. This is what the slides client decided,
+built on the same day against it, with the reasoning that should not be
+re-derived.
+
+**The audience receives a PROJECTION, and one module builds all three
+surfaces.** `slides/src/audience.ts` builds the handout ("Audience copy…"),
+the join snapshot the relay serves (`projectDoc`), and filters every op the
+presenter streams (`projectOp`). Speaker notes and review comments are kept
+back — no export path stripped either before, so the first draft would have
+sent a presenter's notes to the room in the file, in the snapshot, and LIVE
+as they typed. Hidden slides stay: reachable by link, part of the deck. The
+rule that made the module honest, found by driving the real CRDT rather than
+hand-built ops: **every place the doc projection strips, the op projection
+must strip the op carrying the same content** — `doc.layouts` syncs as one
+document-level register, not as slide nodes, and "Save slide as layout"
+mid-show would have streamed a layout's notes while the handout was clean.
+`scripts/test-audience-projection.ts` diffs eight real editor edits through
+the engine and searches the projected wire for a sentinel, content-agnostic,
+so a register nobody knows about yet is caught; CI runs its negative control
+first.
+
+**An audience copy is `role: 'audience'`, not `'reader'`.** Every check that
+reads `collab.role` would otherwise do reader things — join the room path,
+boot the locked editor, skip autosave — and the audience boot path is the
+show. It holds the SHOW key as `collab.key`, the owner-signed audience invite,
+no room key, no private halves, blobs inlined (blob keys derive from
+`collab.key`, so a show-key copy could never open room-key blobs). The ticket
+(invite + show key) lives in the presenter's `collab.audience`, minted once
+and reused for every show; "Issue new tickets" re-mints it and revokes the old
+invite at the relay — defence in depth behind the cryptographic cut.
+
+**The join snapshot is built from a FRESH sync state**, never the save-time
+one: `stash` carries dead-window values including deleted slides' notes, and
+the text history carries every keystroke. The client hands the session the
+projected document only; the session builds the state.
+
+**Navigation is by slide ID; the visible index is only a fallback.** The
+design this replaced navigated by index, and an insert mid-talk moved every
+viewer to the wrong slide, silently. **Follow is the viewer's toggle; Lock is
+the presenter's and wins** — it forces follow on and makes the toggle inert.
+Lock is a UX constraint, not a security one: the viewer holds the whole deck,
+and the button says so in those words rather than implying otherwise. **Live
+is off on every show**; presenting locally never broadcasts by itself. Laser
+samples leave at ≤ 20 fps with pen-up always sent (`slides/src/follow.ts`,
+`scripts/test-broadcast-follow.ts`).
+
+**What was deleted with the old shape:** the separate broadcast socket, its
+derived rooms and trust-on-first-use pinning, `doc.broadcast`, the hosting
+URL, the hosted client, and the relay integration check that tested them.
+The contributor's relay verb logic, follow UI and off-by-default rule are the
+surviving core; the PR stays theirs.

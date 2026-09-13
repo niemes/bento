@@ -15,7 +15,8 @@ import { paintSpeaker, setSpeakerWindow, speakerIdleBody, speakerWindow } from '
 import { ICONS } from './icons'
 import { t } from './i18n'
 import { lsGet, lsSet } from '../../kernel/src/storage.ts'
-import { BroadcastSocket, hostedLink, resolveBroadcastCreds, type BroadcastCreds } from './broadcast'
+import type { ShowEvent, ShowVerbs } from '../../kernel/src/sync/session.ts'
+import { FollowState, laserDue } from './follow'
 import { offlineEnabled } from './update'
 
 const MORPH_DURATION_DEFAULT = 0.65
@@ -27,10 +28,36 @@ export interface PresentSession {
   exit(): void
   /** Absolute slide navigation: jump the show to a 0-based slide index. */
   goTo(index: number): void
-  /** Show or hide the audience blackout (broadcast copy side). */
+  /** Show or hide the audience blackout (audience copy side). */
   setBlack(on: boolean): void
-  /** Position the remote laser dot from a broadcast owner (null = hide). */
+  /** Position the remote laser dot from the presenter (null = hide). */
   setRemoteLaser(p: string | null): void
+}
+
+/**
+ * Live broadcast, as the show sees it. Broadcast is a special case of live
+ * collaboration (docs/DECISIONS.md): the presenter's session streams a
+ * PROJECTED copy of the deck plus three signed verbs to audience copies over
+ * the room they already share. present.ts owns only what is visible — the
+ * Live/Lock toggles, the audience count, follow mode, the cards — and hands
+ * every wire concern to the session through this surface. Payloads are
+ * slides' own objects, sealed by the transport:
+ *   nav   { id, i, lock }   slide ID first (an insert mid-talk costs nothing),
+ *                           visible index as the fallback, and the lock flag
+ *   black { on, lock }
+ *   laser 'fx,fy' | null    fractions of the slide box; ≤ 20 fps at the source
+ */
+export interface PresentBroadcast {
+  /** presenter side — absent on an audience copy */
+  presenter?: {
+    start(): Promise<void>
+    stop(): Promise<void>
+    verbs(): ShowVerbs | null
+  }
+  /** both sides: verbs (audience), count/checkpoint (presenter), closed */
+  onShow(fn: (e: ShowEvent) => void): () => void
+  /** true on an audience copy: follow the presenter, show the follow chip */
+  audience?: boolean
 }
 
 export function startPresentation(
@@ -46,6 +73,7 @@ export function startPresentation(
       deck: Reveal.Api
       buildSection: (s: BentoDoc['slides'][number], i: number) => HTMLElement
     }) => void
+    broadcast?: PresentBroadcast
   } = {},
 ): PresentSession {
   MORPH_DURATION = Math.min(6, Math.max(0.1, doc.present?.morphSeconds ?? MORPH_DURATION_DEFAULT))
@@ -674,21 +702,32 @@ export function startPresentation(
   // true when we adopted a speaker window the EDITOR opened — we drive it but
   // must not close it on exit (it lives beyond this present session).
   let speakerAdopted = false
-  // ——— live slide broadcast ———
-  let broadcastOn = false
-  let broadcastCreds: BroadcastCreds | null = null
-  let broadcastSocket: BroadcastSocket | null = null
-  let broadcastViewers = 0
+  // ——— live broadcast ———
+  const bc = opts.broadcast
+  let showOn = false        // presenter: live
+  let showLock = false      // presenter: the audience is held on my slide
+  let showCount = 0         // presenter: audience sockets, coarse
+  const follow = new FollowState(!!bc?.audience) // audience: follow ⇄ browse, lock
+  let followChip: HTMLButtonElement | null = null
 
-  // Broadcast laser/black frames are throttled to ~30 fps (33 ms) and kept well
-  // under the relay's per-socket burst budget (RATE_BURST 400/10s) alongside nav frames.
+  // Laser frames leave at ≤ 20 fps; the viewer's dot glides between samples
+  // (CSS tween, see setRemoteLaser) so the trail stays smooth. Nav and black
+  // are rare and never throttled. `null` (pen up) always goes (follow.ts).
+  let lastLaserSent = 0
   const sendLaserPoint = (p: string | null) => {
-    if (!broadcastOn || !broadcastCreds) return
-    void broadcastSocket?.sendLaser(broadcastCreds.signerPriv, p)
+    if (!showOn) return
+    const now = performance.now()
+    if (!laserDue(p, now, lastLaserSent)) return
+    lastLaserSent = now
+    bc?.presenter?.verbs()?.laser(p)
   }
   const sendBlackPoint = (on: boolean) => {
-    if (!broadcastOn || !broadcastCreds) return
-    void broadcastSocket?.sendBlack(broadcastCreds.signerPriv, on)
+    if (!showOn) return
+    bc?.presenter?.verbs()?.black({ on, lock: showLock })
+  }
+  const sendNav = (idx: number) => {
+    if (!showOn) return
+    bc?.presenter?.verbs()?.nav({ id: doc.slides[idx]?.id, i: visibleIndex(idx), lock: showLock })
   }
 
   // Second-screen placement is set up in the EDITOR (properties panel) before
@@ -742,16 +781,22 @@ export function startPresentation(
     nav('laser')?.classList.toggle('active', laserEnabled)
     nav('laser')?.setAttribute('aria-pressed', String(laserEnabled))
     nav('reduce')?.classList.toggle('active', reduceMotion)
-    const bcastBtn = nav('broadcast')
-    if (bcastBtn) {
-      bcastBtn.classList.toggle('active', broadcastOn)
-      bcastBtn.setAttribute('aria-pressed', String(broadcastOn))
+    const liveBtn = nav('live')
+    if (liveBtn) {
+      liveBtn.classList.toggle('active', showOn)
+      liveBtn.setAttribute('aria-pressed', String(showOn))
     }
-    const bcastBadge = d.querySelector<HTMLElement>('.sv-bcast')
-    if (bcastBadge) {
-      bcastBadge.hidden = !broadcastOn
-      bcastBadge.textContent = broadcastOn ? String(broadcastViewers) : ''
-      bcastBadge.title = t('N viewers').replace('N', String(broadcastViewers))
+    const lockBtn = nav('lock')
+    if (lockBtn) {
+      lockBtn.classList.toggle('active', showLock)
+      lockBtn.setAttribute('aria-pressed', String(showLock))
+      lockBtn.toggleAttribute('disabled', !showOn)
+    }
+    const badge = d.querySelector<HTMLElement>('.sv-bcast')
+    if (badge) {
+      badge.hidden = !showOn
+      badge.textContent = showOn ? String(showCount) : ''
+      badge.title = t('N viewers').replace('N', String(showCount))
     }
   }
 
@@ -767,29 +812,23 @@ export function startPresentation(
     toastTimer = window.setTimeout(() => el!.classList.remove('show'), 1400)
   }
 
-  const postBroadcastLink = (link: string | null) => {
-    if (!speaker || speaker.closed) return
-    try { speaker.postMessage({ bento: 'broadcast', link }, '*') } catch { /* gone */ }
-  }
-
-  const stopBroadcast = () => {
-    if (!broadcastOn) return
-    if (broadcastCreds) {
-      sendLaserPoint(null)
-      sendBlackPoint(false)
-    }
-    broadcastOn = false
-    broadcastSocket?.destroy()
-    broadcastSocket = null
-    broadcastCreds = null
-    broadcastViewers = 0
-    postBroadcastLink(null)
+  const stopShow = async () => {
+    if (!showOn) return
+    sendLaserPoint(null)
+    sendBlackPoint(false)
+    showOn = false
+    showLock = false
+    showCount = 0
     updateSpeakerControls()
+    try { await bc?.presenter?.stop() } catch (err) { console.error('[bento-broadcast] end failed', err) }
   }
 
-  const toggleBroadcast = async () => {
-    if (broadcastOn) {
-      stopBroadcast()
+  // OFF on every show. Presenting locally must never silently broadcast; the
+  // presenter goes live on purpose, from the speaker view, every time.
+  const toggleShow = async () => {
+    if (!bc?.presenter) return
+    if (showOn) {
+      await stopShow()
       flashPresentMsg(t('Broadcast ended'))
       return
     }
@@ -798,27 +837,27 @@ export function startPresentation(
       return
     }
     try {
-      const creds = await resolveBroadcastCreds(doc, doc.docId)
-      const socket = new BroadcastSocket(creds.room, creds.tok, {
-        onNav: () => {},
-        onPresence: (count) => { broadcastViewers = count; updateSpeakerControls() },
-        // re-send the CURRENT slide on every open: a mid-show reconnect must
-        // re-sync viewers who joined while the socket was down (the relay only
-        // replays lastNav to the reconnecting socket itself)
-        onState: (s) => {
-          if (s === 'open') void socket.sendNav(creds.signerPriv, visibleIndex(deck.getIndices().h))
-        },
-      }, creds.signerPub)
-      broadcastSocket = socket
-      socket.connect()
-      broadcastOn = true
-      broadcastCreds = creds
-      postBroadcastLink(doc.meta?.hostClient ? hostedLink(doc.meta.hostClient, creds.roomName) : null)
+      await bc.presenter.start()
+      showOn = true
       updateSpeakerControls()
+      sendNav(deck.getIndices().h)
+      if (blacked) sendBlackPoint(true)
+      flashPresentMsg(t('Live — audience copies now follow you'))
     } catch (err) {
-      console.error('[bento-broadcast] arm failed', err)
+      console.error('[bento-broadcast] go live failed', err)
       flashPresentMsg(t('Broadcast failed'))
     }
+  }
+
+  // Lock is a UX constraint, not a security one — the audience already holds
+  // the whole deck (their copy IS the deck). It disables their follow toggle;
+  // it hides nothing. The button's title says so, in those words.
+  const toggleLock = () => {
+    if (!showOn) return
+    showLock = !showLock
+    updateSpeakerControls()
+    sendNav(deck.getIndices().h) // the lock flag rides on nav
+    flashPresentMsg(showLock ? t('Audience locked to your slide') : t('Audience may browse the deck'))
   }
 
   const setReduceMotion = (on: boolean, persist = true) => {
@@ -915,15 +954,10 @@ export function startPresentation(
           navBtn('laser', ICONS.laser, t('Laser pointer (L)'), true) +
           navBtn('grid', '▦', t('All slides (G)')) +
           navBtn('reduce', '⏸', t('Reduce motion (M)')) +
-          navBtn('broadcast', ICONS.broadcast, t('Broadcast to audience')) +
+          navBtn('live', ICONS.broadcast, t('Go live — audience copies follow your slides')) +
+          navBtn('lock', '🔒', t('Lock keeps the audience on your slide. It does not hide the rest of the deck, which they already have.')) +
         `</div>` +
         `<span class="sv-bcast" hidden title="${t('N viewers')}"></span>` +
-      `</div>` +
-      `<div class="sv-bcast-link" hidden>` +
-        `<span class="sv-bcast-label">${t('Broadcast link')}</span>` +
-        `<input type="text" class="sv-bcast-input" readonly>` +
-        `<button class="sv-bcast-copy">${t('Copy broadcast link')}</button>` +
-        `<span class="sv-bcast-copied" hidden>${t('Broadcast link copied')}</span>` +
       `</div>` +
       `<div class="sv-main">` +
         `<div class="sv-current"></div>` +
@@ -938,61 +972,14 @@ export function startPresentation(
     const bcastStyle = d.createElement('style')
     bcastStyle.textContent =
       // a display property on the rule would override the UA's [hidden]{display:none},
-      // so the [hidden] variants must restate it explicitly
+      // so the [hidden] variant must restate it explicitly
       `.sv-bcast { display:inline-block; min-width:1.6em; text-align:center; background:rgba(255,255,255,0.15); border-radius:999px; padding:0.15em 0.5em; margin-left:0.5em; font-size:0.85em; line-height:1; }` +
-      `.sv-bcast[hidden] { display:none; }` +
-      `.sv-bcast-link { padding:0.5em 0.85em; background:#1a1f24; border-bottom:1px solid #2a2f35; display:flex; align-items:center; gap:0.6em; }` +
-      `.sv-bcast-link[hidden] { display:none; }` +
-      `.sv-bcast-label { color:#9aa4ad; font-size:0.9em; }` +
-      `.sv-bcast-input { flex:1; background:#0d1114; border:1px solid #3a424b; color:#e8eaed; padding:0.3em 0.5em; border-radius:4px; font-size:0.9em; }` +
-      `.sv-bcast-copy { background:#3a424b; color:#fff; border:none; border-radius:4px; padding:0.4em 0.8em; cursor:pointer; font-size:0.9em; }` +
-      `.sv-bcast-copy:hover { background:#4b5563; }` +
-      `.sv-bcast-copied { color:#7ee787; font-size:0.9em; }`
+      `.sv-bcast[hidden] { display:none; }`
     // the popup head persists across openSpeaker calls — never append a second copy
     if (!d.head.querySelector('style[data-bento-bcast]')) {
       bcastStyle.dataset.bentoBcast = '1'
       d.head.appendChild(bcastStyle)
     }
-
-    const bcastScript = d.createElement('script')
-    bcastScript.textContent = `
-(function(){
-  if (window.__bentoBcastBound) return
-  window.__bentoBcastBound = true
-  window.addEventListener('message', (ev) => {
-    if (ev.source !== window.opener) return
-    const data = ev.data
-    if (!data || data.bento !== 'broadcast') return
-    const linkBox = document.querySelector('.sv-bcast-link')
-    const input = linkBox ? linkBox.querySelector('.sv-bcast-input') : null
-    const copyBtn = linkBox ? linkBox.querySelector('.sv-bcast-copy') : null
-    const copied = linkBox ? linkBox.querySelector('.sv-bcast-copied') : null
-    if (!linkBox || !input || !copyBtn) return
-    const bindOnce = () => {
-      if (linkBox.dataset.bound) return
-      linkBox.dataset.bound = '1'
-      copyBtn.addEventListener('click', () => {
-        navigator.clipboard.writeText(input.value).then(() => {
-          if (copied) copied.hidden = false
-          window.setTimeout(() => { if (copied) copied.hidden = true }, 1200)
-        }, () => {})
-      })
-    }
-    if (data.link) {
-      linkBox.hidden = false
-      input.value = data.link
-      input.placeholder = ''
-      copyBtn.hidden = false
-      if (copied) copied.hidden = true
-    } else {
-      linkBox.hidden = true
-      return
-    }
-    bindOnce()
-  })
-})()
-`
-    d.body.appendChild(bcastScript)
 
     speakerStart = performance.now()
     d.querySelector('.sv-timer')?.addEventListener('click', () => { speakerStart = performance.now() })
@@ -1048,7 +1035,8 @@ export function startPresentation(
       else if (k === 'laser') toggleLaser()
       else if (k === 'grid') toggleGrid()
       else if (k === 'reduce') toggleReduceMotion()
-      else if (k === 'broadcast') toggleBroadcast()
+      else if (k === 'live') void toggleShow()
+      else if (k === 'lock') toggleLock()
     }
     d.querySelectorAll<HTMLButtonElement>('.sv-btn[data-nav]').forEach((b) => {
       b.addEventListener('click', () => doNav(b.dataset.nav!))
@@ -1069,12 +1057,6 @@ export function startPresentation(
     })
 
     updateSpeaker()
-    // Re-post the broadcast link if a show is already armed — the link is
-    // posted on arm/stop only, so a popup reopened mid-broadcast would
-    // otherwise show an empty row.
-    if (broadcastOn && broadcastCreds) {
-      postBroadcastLink(doc.meta?.hostClient ? hostedLink(doc.meta.hostClient, broadcastCreds.roomName) : null)
-    }
     if (!speakerAdopted && wasFullscreen) {
       // A fresh window on THIS display sits behind the fullscreen slides — drop
       // fullscreen so the notes are visible. (Open notes from the Slide panel and
@@ -1145,7 +1127,8 @@ export function startPresentation(
   const exit = () => {
     if (exited) return
     exited = true
-    stopBroadcast() // a broadcast never outlives its show
+    void stopShow() // a broadcast never outlives its show
+    unShow?.()
     // measurements are keyed by slide INDEX, so they'd be wrong for the next
     // show if the deck was edited in between — never carry them across
     symCache.clear()
@@ -1315,10 +1298,7 @@ export function startPresentation(
     // symbol-morph on the way out. symbolOffsets normalises by the element's
     // own box, so measuring mid-morph is safe.
     cacheSlideSymbols(doc, to, toIdx)
-    if (broadcastOn && broadcastCreds) {
-      const n = visibleIndex(toIdx)
-      void broadcastSocket?.sendNav(broadcastCreds.signerPriv, n)
-    }
+    sendNav(toIdx)
     updateSpeaker()
   }) as any)
 
@@ -1337,6 +1317,68 @@ export function startPresentation(
   const goTo = (index: number) => {
     if (deckReady) deck.slide(index, 0)
     else pendingIndex = index
+  }
+
+  // ——— the audience side: follow the presenter ———
+  // The decisions live in follow.ts (rig-driven); this is the DOM around them.
+  const updateFollowChip = () => {
+    if (!followChip) return
+    const state = follow.label()
+    followChip.classList.toggle('following', follow.following)
+    followChip.toggleAttribute('disabled', follow.locked)
+    followChip.textContent = state === 'locked'
+      ? t('Following the presenter (locked)')
+      : state === 'following' ? t('Following the presenter') : t('Browsing — click to follow')
+    followChip.title = state === 'locked'
+      ? t('The presenter has locked the audience to their slide')
+      : state === 'following' ? t('Click to browse the deck on your own') : t('Click to snap back to the presenter')
+  }
+  const showCard = (text: string, sticky = false) => {
+    let el = overlay.querySelector<HTMLElement>('.bento-show-card')
+    if (!el) { el = document.createElement('div'); el.className = 'bento-show-card'; overlay.appendChild(el) }
+    el.textContent = text
+    el.hidden = false
+    if (!sticky) window.setTimeout(() => { if (el) el.hidden = true }, 4000)
+  }
+  if (bc?.audience) {
+    followChip = document.createElement('button')
+    followChip.className = 'bento-follow-chip'
+    followChip.addEventListener('click', () => {
+      const jump = follow.toggle()
+      updateFollowChip()
+      if (jump !== null) goTo(jump)
+    })
+    overlay.appendChild(followChip)
+    updateFollowChip()
+    showCard(t('Waiting for the presenter…'), true)
+  }
+  let unShow: (() => void) | undefined
+  if (bc) {
+    unShow = bc.onShow((e) => {
+      if (e.t === 'count') { showCount = e.n; updateSpeakerControls(); return }
+      if (e.t === 'checkpoint') return // the session re-sends the audsnap itself
+      if (e.t === 'closed') {
+        if (!bc.audience) return
+        if (e.code === 4001) { follow.applyLock(false); updateFollowChip(); showCard(t('The show has ended — this copy stays a working deck')) }
+        else if (e.code === 4002) showCard(t('Waiting for the presenter…'), true)
+        else if (e.code === 1008) showCard(t('Your audience copy is no longer valid — ask the presenter for a new one'), true)
+        return
+      }
+      if (!bc.audience) return
+      const p = (e.payload ?? {}) as { id?: string; i?: number; on?: boolean; lock?: boolean }
+      if (e.kind === 'nav') {
+        overlay.querySelector<HTMLElement>('.bento-show-card')?.setAttribute('hidden', '')
+        const jump = follow.nav(doc.slides, p)
+        updateFollowChip()
+        if (jump !== null) goTo(jump)
+      } else if (e.kind === 'black') {
+        follow.applyLock(p.lock)
+        updateFollowChip()
+        setBlack(!!p.on)
+      } else if (e.kind === 'laser') {
+        setRemoteLaser(typeof e.payload === 'string' ? e.payload : null)
+      }
+    })
   }
 
   deck.initialize().then(() => {

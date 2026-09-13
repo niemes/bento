@@ -423,9 +423,6 @@ export interface BentoDoc {
     subject?: string
     event?: string
     keywords?: string
-    /** Hosting URL of this deck's broadcast copy — lets any collaborator mint
-     *  hosted broadcast links (docs/hosted-broadcast-design.md). */
-    hostClient?: string
   }
   /** slide coordinate space, px */
   size: { width: number; height: number }
@@ -544,21 +541,6 @@ export interface BentoDoc {
    * documents — it is what lets an offline-edited copy rejoin as a true
    * fork and merge both ways. Never transmitted as sync ops.
    */
-  /**
-   * Live slide broadcast: a read-only copy that boots straight into
-   * present-follow mode. Old shells ignore this field and open the copy as a
-   * plain snapshot. The copy carries only the room name and relay origin — the
-   * connect token is DERIVED from the room name (broadcastTok), so the file
-   * never embeds a secret. No signing key, no symmetric key, no CRDT state.
-   *
-   * A document-level field, not part of `collab`: a broadcast copy that is not
-   * also a hosted reader replica has NO collab at all, and `collab`, when
-   * present, always carries a minted room and key — the kernel's sync layer is
-   * typed on that and every transport relies on it. Putting broadcast inside
-   * collab would have made room/key optional, the first document shape to do
-   * so, and every kernel boundary would have needed a cast to lie about it.
-   */
-  broadcast?: { room: string; relay: string }
   collab?: {
     room: string
     key: string

@@ -1258,6 +1258,13 @@ jobs:
             echo 'negative control passed with the boundary removed'; exit 1; fi
           node scripts/test-audience-projection.ts
 
+      - name: Broadcast follow-mode rig
+        # The audience side's decisions (slides/src/follow.ts): nav by slide
+        # ID with the index only as fallback — an insert mid-talk moves nobody;
+        # follow is the viewer's, lock is the presenter's and wins; laser
+        # samples rate-limited at the source with pen-up always sent.
+        run: node scripts/test-broadcast-follow.ts
+
       - name: slides store rig
         # The editor's undo/redo, selection and whole-deck replacement, at the
         # store level rather than through the DOM. Bundled first for the same

@@ -36,7 +36,7 @@ import { availablePacks, fetchPack, markFileSaved, packCoverage, packsInFile, st
 import { injectFonts } from '../fonts'
 import { appConfig } from '../../../kernel/src/app.ts'
 import { disconnectOnline, joinFromDoc, mintCollab, mintInvite, mintRoomKey, onlineTransport, rotateKeys, sharingOn, startSharing, stopSharing } from '../sync/online'
-import { projectDoc, type AudienceTicket } from '../audience'
+import { projectDoc, projectOp, type AudienceTicket } from '../audience'
 import { lsGet, lsJson, lsSet } from '../../../kernel/src/storage.ts'
 
 const i18nT = t
@@ -2171,7 +2171,41 @@ export class Editor {
       this.presenting = false
       this.store.goTo(last)
       this.canvas.render()
-    }, { fullscreen })
+    }, { fullscreen, broadcast: this.presenterBroadcast() })
+  }
+
+  /**
+   * The show's broadcast surface, presenter side. The speaker view's Live
+   * toggle calls start(): make sure we are sharing (a proven writer), mint or
+   * reuse the audience ticket, and hand the session the show key plus the two
+   * projection functions — projectOp for every op it streams from now on,
+   * projectDoc for the audsnap it seals (and re-seals on checkpoint). The
+   * session does the rest; the show only sends verbs. Absent when there is no
+   * session at all (offline shell), so the toggle is inert rather than broken.
+   */
+  private presenterBroadcast(): import('../present').PresentBroadcast | undefined {
+    const session = this.session
+    if (!session) return undefined
+    return {
+      onShow: (fn) => session.onShow(fn),
+      presenter: {
+        start: async () => {
+          await this.goLive()
+          const ticket = await this.audienceTicket()
+          if (!ticket) throw new Error('only the deck owner can broadcast')
+          await session.startShow({
+            showKey: ticket.key,
+            projectOp,
+            // the PROJECTED document only — the session builds a fresh
+            // adopt-shaped state itself (a saved state's internals carry
+            // deleted slides' notes and the whole text history)
+            snapshot: () => ({ doc: projectDoc(this.store.doc, ticket).doc, state: undefined as never }),
+          })
+        },
+        stop: () => session.endShow(),
+        verbs: () => session.show,
+      },
+    }
   }
 
   // --- paste: external objects + cross-deck elements/slides ---------------------
