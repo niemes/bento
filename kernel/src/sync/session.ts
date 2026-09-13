@@ -204,6 +204,8 @@ export interface Transport {
   // ——— broadcast (the online transport only; BroadcastChannel has no show) ———
   /** resolves once the socket may write (proven, or an older/relay reader) */
   writeReady?(): Promise<void>
+  /** true when this is a receive-only audience socket */
+  readonly audience?: boolean
   /** import (or clear, with null) the per-show key Ke */
   setShowKey?(rawB64: string | null): Promise<void>
   /** an op batch to the audience, sealed under Ke */
@@ -663,6 +665,13 @@ export class SyncSession {
     } finally {
       this.applying = false
     }
+    // While presenting, a CO-PRESENTER's edits arrive here, not through flush,
+    // so they must be projected onto the aud stream too — otherwise the
+    // audience sees another writer's changes only at the next checkpoint. Only
+    // the presenter has a show config, so this fires for it alone; the audience
+    // (which reaches applyRemote via applyShowOps) has none and re-projects
+    // nothing.
+    if (this.showCfg) this.projectToAudience(ops)
     if (this.state.gappedActors.length) {
       this.send({ t: 'need', a: this.actor, vv: this.state.vv })
     }
@@ -807,6 +816,7 @@ export class SyncSession {
   async startShow(cfg: ShowConfig): Promise<void> {
     const tr = this.showTransport()
     if (!tr?.setShowKey) throw new Error('startShow: no online transport to broadcast on')
+    if (tr.audience) throw new Error('startShow: an audience copy cannot present')
     this.showCfg = cfg
     await tr.setShowKey(cfg.showKey)
     await tr.writeReady?.()
