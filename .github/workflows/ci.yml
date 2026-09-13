@@ -1238,6 +1238,17 @@ jobs:
         # image gone from a file with nothing on screen to say so.
         run: node scripts/test-slides-assets.ts
 
+      - name: Audience projection rig
+        # Live broadcast: the handout, the join snapshot and every streamed op
+        # go through slides/src/audience.ts, which keeps back speaker notes
+        # and review comments and nothing else. Runs the negative control
+        # first — with the boundary emptied the rig must go red, or it is
+        # checking nothing.
+        run: |
+          if node scripts/test-audience-projection.ts --mutate > /dev/null 2>&1; then
+            echo 'negative control passed with the boundary removed'; exit 1; fi
+          node scripts/test-audience-projection.ts
+
       - name: slides store rig
         # The editor's undo/redo, selection and whole-deck replacement, at the
         # store level rather than through the DOM. Bundled first for the same

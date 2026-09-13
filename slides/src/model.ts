@@ -591,11 +591,29 @@ export interface BentoDoc {
     invite?: {
       pub: string
       priv: string
+      /** 'audience' (live broadcast) admits a receive-only socket for the
+       *  duration of a show; it travels only in audience copies, whose `key`
+       *  is the show key rather than the room key (see src/audience.ts).
+       *  The kernel's CollabInvite widens to it with the session change that
+       *  streams the show; until then src/audience.ts casts. */
       role: 'writer' | 'commenter'
       /** unix ms expiry; 0/absent = no expiry */
       exp?: number
       /** owner's signature over `inv.${pub}.${role}.${exp||0}` */
       sig: string
+    }
+    /**
+     * Live broadcast tickets (PRESENTER's copy only; additive, old shells
+     * preserve it). Minted once by "Save audience copy…" and reused for every
+     * show until "Issue new tickets" re-mints both halves, which kills every
+     * outstanding audience copy: `invite` is the owner-signed audience
+     * invite the relay admits on, `key` the per-show symmetric key the
+     * presenter double-encrypts under while live. Never in an audience copy
+     * (that copy carries the invite and has `key` AS its collab.key).
+     */
+    audience?: {
+      invite: { pub: string; priv: string; role: 'audience'; exp?: number; sig: string }
+      key: string
     }
   }
   /**
