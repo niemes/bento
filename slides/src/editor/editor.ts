@@ -35,8 +35,8 @@ import { t, setLocale, locale, localeChoices, LOCALE_CHOICES, applyDirection, is
 import { availablePacks, fetchPack, markFileSaved, packCoverage, packsInFile, stageForFile, unstageFromFile } from '../packs'
 import { injectFonts } from '../fonts'
 import { appConfig } from '../../../kernel/src/app.ts'
-import { disconnectOnline, joinFromDoc, mintCollab, mintInvite, onlineTransport, rotateKeys, sharingOn, startSharing, stopSharing } from '../sync/online'
-import { resolveBroadcastCreds } from '../broadcast'
+import { disconnectOnline, joinFromDoc, mintCollab, mintInvite, mintRoomKey, onlineTransport, rotateKeys, sharingOn, startSharing, stopSharing } from '../sync/online'
+import { projectDoc, type AudienceTicket } from '../audience'
 import { lsGet, lsJson, lsSet } from '../../../kernel/src/storage.ts'
 
 const i18nT = t
@@ -963,44 +963,72 @@ export class Editor {
     }
   }
 
-  /** A live broadcast hand-out: opens straight into the show and follows the
-   *  presenter's slide changes in real time. When a hosting URL is set
-   *  (doc.meta.hostClient) the copy ALSO carries the collab read cap — it
-   *  live-syncs slide content from the deck's collab room, so a copy hosted
-   *  once stays current as the deck is edited (docs/hosted-broadcast-design.md). */
-  private async saveBroadcastCopy() {
-    const creds = await resolveBroadcastCreds(this.store.doc, this.store.doc.docId)
-    const clone = JSON.parse(JSON.stringify(this.store.doc)) as import('../model').BentoDoc
-    clone.docId = newDocId()
-    delete clone.readonly
+  /**
+   * The audience TICKET for live broadcast — minted once per deck, reused for
+   * every show, replaced only by "Issue new tickets". An audience member is a
+   * collaborator whose `collab.key` is the SHOW key, not the room key: the
+   * presenter double-encrypts while live and the relay never persists that
+   * stream, so between shows the ticket decrypts nothing (docs/DECISIONS.md,
+   * the broadcast entry). Owner-only: the invite is owner-signed.
+   */
+  private async audienceTicket(): Promise<AudienceTicket | null> {
     const c = this.store.doc.collab
-    // Only a deck with a hosting URL mints a LIVE hosted copy — a reader replica
-    // that follows the session (main.ts broadcastMode). A plain broadcast copy
-    // is a pure snapshot: no room, no keys, no collab block at all. Either way
-    // the private halves go through stripCollabSecrets, the one function every
-    // export uses, so a new secret field is stripped here the day it is added
-    // there rather than the day someone remembers this list.
-    const hosted = !!(this.store.doc.meta?.hostClient && c?.room && c.key)
-    if (hosted) {
-      clone.collab = { ...c!, role: 'reader', on: true, sync: undefined }
-      stripCollabSecrets(clone, { keepRoom: true })
-    } else {
-      stripCollabSecrets(clone)
+    if (!(c?.room && c.key && c.v === 2 && c.ownerPriv)) return null
+    if (c.audience) return c.audience
+    // role 'audience' — the kernel's invite role union widens with the session
+    // change that streams the show; the relay already admits it (#453).
+    const invite = await mintInvite(c.ownerPriv, 'audience' as 'writer')
+    const ticket: AudienceTicket = { invite: { ...invite, role: 'audience' }, key: mintRoomKey() }
+    this.store.commit(() => { this.store.doc.collab!.audience = ticket })
+    return ticket
+  }
+
+  /** A live broadcast hand-out: opens straight into the show and follows the
+   *  presenter while they are live. Built by the audience PROJECTION
+   *  (src/audience.ts) — the same function that builds the join snapshot the
+   *  relay serves — so it never carries speaker notes, comments, the room key
+   *  or any private half; blobs are inlined because a show-key copy cannot
+   *  open room-key blobs. Between shows it is a plain, working deck. */
+  private async saveAudienceCopy() {
+    await this.goLive()
+    const ticket = await this.audienceTicket()
+    if (!ticket) {
+      this.toast(t('Only the deck owner can issue audience tickets'))
+      return
     }
-    // The broadcast credentials live on the DOCUMENT, not in collab: the copy
-    // carries only the derived room name and the relay origin, never a secret.
-    clone.broadcast = { room: creds.roomName, relay: creds.relay }
+    this.canvas.commitTextEdit()
+    const { doc: copy, missingAssets } = projectDoc(this.store.doc, ticket)
+    copy.docId = this.store.doc.docId // same document: the audience follows THIS deck
+    if (missingAssets.length) this.toast(t('Some offloaded images are not on this machine yet and will be missing from the copy'))
     try {
       // serializeAuto, like every other copy written for a person: an active
       // password reaches the file. A viewer of an encrypted deck needs the
-      // password, which is what encrypting the deck meant. A presenter who
-      // wants an open copy removes the password first, and that is a choice
-      // made in the open rather than a plaintext file written in silence.
-      const ok = await writeUpdatedFileAs(await serializeAuto(clone), clone, { suffix: 'broadcast', keepHandle: false })
-      if (ok) this.toast(t('Broadcast copy saved — viewers open it and their slides follow yours'))
+      // password, which is what encrypting the deck meant.
+      const ok = await writeUpdatedFileAs(await serializeAuto(copy), copy, { suffix: 'audience', keepHandle: false })
+      if (ok) this.toast(t('Audience copy saved — it opens into the show and follows you while you are live'))
     } catch {
       this.toast(t('Saving failed'))
     }
+  }
+
+  /** Re-mint the audience ticket. Every audience copy handed out so far is
+   *  dead from this moment — cryptographically (a new show key; nothing is
+   *  ever encrypted under the old one again) and at the door (the old invite
+   *  is revoked at the relay). A recurring class's handouts included: say so. */
+  private async issueNewTickets() {
+    const c = this.store.doc.collab
+    if (!(c?.v === 2 && c.ownerPriv && c.owner)) {
+      this.toast(t('Only the deck owner can issue audience tickets'))
+      return
+    }
+    const old = c.audience
+    if (!old) { this.toast(t('No audience tickets have been issued for this deck')); return }
+    if (!confirm(t('Issue new tickets? Every audience copy saved so far will stop working, including ones you handed out for a recurring session.'))) return
+    const tr = onlineTransport()
+    if (tr) await tr.revokeKey(old.invite.pub, c.owner, c.ownerPriv) // defence in depth behind the key change
+    this.store.commit(() => { delete this.store.doc.collab!.audience })
+    const fresh = await this.audienceTicket()
+    if (fresh) this.toast(t('New tickets issued — save a new audience copy to hand out'))
   }
 
   /** A live viewer: follows the shared session read-only. Keeps the room + read
@@ -1389,8 +1417,12 @@ export class Editor {
         t('A live viewer: follows every edit as it happens but can never change the deck — the relay enforces it.'))
       action(ICONS.slideshow, t('Present-only file…'), false, () => void this.savePresentationPackage(),
         t('A sealed hand-out that opens straight into the show — no editor, no live connection.'))
-      action(ICONS.broadcast, t('Broadcast copy…'), false, () => void this.saveBroadcastCopy(),
-        t('A live broadcast hand-out — opens into the show and follows your slides in real time.'))
+      action(ICONS.broadcast, t('Audience copy…'), false, () => void this.saveAudienceCopy(),
+        t('A hand-out for a live show: opens into the presentation and follows your slides while you are live. Never carries your speaker notes or comments.'))
+      if (this.store.doc.collab?.audience) {
+        action(ICONS.broadcast, t('Issue new tickets…'), false, () => void this.issueNewTickets(),
+          t('Replaces the audience tickets: every audience copy saved so far stops working.'))
+      }
       action(ICONS.template, t('Template…'), false, () => void this.saveAsTemplate(),
         t('A reusable starter: everyone who opens it gets their own fresh, independent deck.'))
     } else {
@@ -1425,12 +1457,9 @@ export class Editor {
    *  "share" is one action for users — no separate start-a-session step. */
   private async goLive() {
     if (!this.session || offlineEnabled()) return
-    // A broadcast copy carries no room or key and must never become a live
-    // collab session of its own. Guarded here rather than in the kernel's
-    // startSharing(): `doc.broadcast` is a slides field, and the kernel
-    // should not learn it. (main.ts boots such a copy into broadcastMode and
-    // never reaches this; the guard is for the shell that somehow does.)
-    if (this.store.doc.broadcast) return
+    // An audience copy holds the SHOW key, not the room key, and must never
+    // mint or join a session of its own — its only path is the show (main.ts).
+    if ((this.store.doc.collab?.role as string) === 'audience') return
     this.session.enableSharing()
     await startSharing(this.session, this.store)
     this.wireOnlineStatus()
@@ -3401,32 +3430,6 @@ export class Editor {
     metaField(t('Subject'), () => this.store.doc.meta?.subject ?? '', (v) => { ensureMeta().subject = v })
     metaField(t('Event'), () => this.store.doc.meta?.event ?? '', (v) => { ensureMeta().event = v })
     metaField(t('Keywords'), () => this.store.doc.meta?.keywords ?? '', (v) => { ensureMeta().keywords = v })
-    // Broadcast hosting URL — where the broadcast copy lives. The speaker view
-    // builds the viewer link from it (hostedLink), so a garbage value would
-    // produce a share link nobody can open: validate on change.
-    const hostRow = div('ed-about-meta')
-    const hostLabel = document.createElement('label')
-    hostLabel.textContent = t('Broadcast hosting URL')
-    const hostInp = document.createElement('input')
-    hostInp.type = 'url'
-    hostInp.placeholder = 'https://…'
-    hostInp.value = this.store.doc.meta?.hostClient ?? ''
-    hostInp.addEventListener('change', () => {
-      const v = hostInp.value.trim()
-      // https:// anywhere; http:// only for local dev hosts — a plain-http
-      // hosted client is a mixed-content dead end for viewers on https pages
-      if (v && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(v)) {
-        this.toast(t('That doesn’t look like a URL — it should start with https://'))
-        hostInp.value = this.store.doc.meta?.hostClient ?? ''
-        return
-      }
-      this.store.commit(() => {
-        if (v) ensureMeta().hostClient = v
-        else if (this.store.doc.meta) delete this.store.doc.meta.hostClient
-      })
-    })
-    hostRow.append(hostLabel, hostInp)
-    metaWrap.appendChild(hostRow)
     box.appendChild(metaWrap)
 
     const fine = div('ed-about-fine')

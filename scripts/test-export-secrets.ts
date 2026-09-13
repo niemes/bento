@@ -186,6 +186,35 @@ for (const name of EXPORTS) {
 ok(!/writeText\(JSON\.stringify\(this\.store\.doc\)/.test(body('copyDocJson')),
   'copyDocJson() copies a stripped CLONE, never the live document')
 
+// The audience copy (live broadcast) is the one export that does NOT go
+// through stripCollabSecrets: it is built by the audience PROJECTION, which
+// replaces the collab block outright (show key as collab.key, audience
+// invite, no private halves) and also strips speaker notes and comments — the
+// two fields no other export strips. It is invisible to the catch-all below
+// (projectDoc clones internally), so it is pinned here by shape AND by running
+// the projection on a deck that carries everything it must lose.
+{
+  const aud = body('saveAudienceCopy')
+  ok(/\bprojectDoc\(this\.store\.doc,/.test(aud), 'saveAudienceCopy() builds the copy with projectDoc(this.store.doc, …)')
+  ok(!/serializeAuto\(this\.store\.doc\)|writeUpdatedFileAs\([^)]*this\.store\.doc/.test(mask(aud)),
+    'saveAudienceCopy() never hands the LIVE document to the sink')
+  const { projectDoc, carriesHidden } = await import('../slides/src/audience.ts')
+  const ROOM = 'ROOM-KEY-MUST-NOT-TRAVEL', PRIV = 'OWNER-PRIV-MUST-NOT-TRAVEL', NOTE = 'NOTES-MUST-NOT-TRAVEL'
+  const deck = {
+    format: 'bento/slides', version: 1, docId: 'd', title: 't', size: { width: 1, height: 1 },
+    theme: { background: '#fff', color: '#000', accent: '#f00', fontFamily: 'x' },
+    slides: [{ id: 's', background: '#fff', transition: 'fade', elements: [], notes: NOTE,
+      comments: [{ id: 'c', author: 'a', text: NOTE, at: 'now' }] }],
+    collab: { room: 'w1', key: ROOM, on: true, v: 2, owner: 'O', ownerPriv: PRIV, writerPriv: PRIV,
+      invite: { pub: 'I', priv: PRIV, role: 'writer', sig: 'S' } },
+  }
+  const out = JSON.stringify(projectDoc(deck as never, { invite: { pub: 'A', priv: 'AP', role: 'audience', sig: 'S' }, key: 'SHOW' }).doc)
+  ok(!out.includes(ROOM), 'an audience copy carries no room key')
+  ok(!out.includes(PRIV), 'an audience copy carries no private half')
+  ok(!out.includes(NOTE), 'an audience copy carries no speaker notes and no comments')
+  ok(carriesHidden(JSON.parse(out)).length === 0, 'carriesHidden() agrees: nothing hidden travels')
+}
+
 // The catch-all: any method that clones the document and then hands it to an
 // outbound sink is an export, named in the list above or not. saveAsNewDeck is
 // the one clone that legitimately keeps a session — it mints a brand new one.
