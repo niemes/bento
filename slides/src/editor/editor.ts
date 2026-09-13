@@ -2199,7 +2199,7 @@ export class Editor {
             // the PROJECTED document only — the session builds a fresh
             // adopt-shaped state itself (a saved state's internals carry
             // deleted slides' notes and the whole text history)
-            snapshot: () => ({ doc: projectDoc(this.store.doc, ticket).doc, state: undefined as never }),
+            snapshot: () => ({ doc: projectDoc(this.store.doc, ticket).doc }),
           })
         },
         stop: () => session.endShow(),
