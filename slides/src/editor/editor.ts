@@ -3591,6 +3591,11 @@ function stripCollabSecrets(doc: import('../model').BentoDoc, opts: { keepRoom?:
   delete doc.collab.writerPriv // the muzzle — no write capability travels
   delete doc.collab.ownerPriv // v2: neither the owner key…
   delete doc.collab.invite //    …nor any invite (delegation) material
+  // …nor the audience ticket store: presenter-only. It holds the show key
+  // (worthless to a reader, who sees everything anyway) AND the audience
+  // invite's private half, which would let a reader mint audience tickets the
+  // presenter never issued. Stripped like the other private halves.
+  delete doc.collab.audience
 }
 
 /** Deep-clone an element with a fresh id (same-slide duplicates must not share ids). */

@@ -154,13 +154,20 @@ const collabBlock = (() => {
   return src.slice(open, i + 1)
 })()
 
-const collabFields = [...collabBlock.matchAll(/^ {4}([A-Za-z_$][\w$]*)\??:/gm)].map((m) => m[1])
-// Private key material: anything ending in -Priv, plus the delegation keypair.
+const fieldDecls = [...collabBlock.matchAll(/^ {4}([A-Za-z_$][\w$]*)\??:/gm)]
+const collabFields = fieldDecls.map((m) => m[1])
+// Private key material: anything ending in -Priv, the delegation keypair, and
+// ANY field whose declared type carries a `priv` key inside it — the audience
+// ticket store (`audience: { invite: { priv … }, key }`) is an object, matched
+// neither -Priv nor 'invite', and rode into every keepRoom copy until security
+// found it (2026-09-13): a reader could mint audience tickets the presenter
+// never issued. Discovery by SHAPE so the next nested keypair is caught too.
 // `key` and `room` are the read capability — a copy that must follow the live
 // session keeps them, so they are only covered by the drop-the-block default.
-const privateFields = collabFields.filter((f) => /Priv$/.test(f) || f === 'invite')
+const typeOf = (i: number) => collabBlock.slice(fieldDecls[i].index!, fieldDecls[i + 1]?.index ?? collabBlock.length)
+const privateFields = collabFields.filter((f, i) => /Priv$/.test(f) || f === 'invite' || /\bpriv\??:/.test(typeOf(i)))
 
-ok(collabFields.includes('key') && privateFields.length >= 3,
+ok(collabFields.includes('key') && privateFields.length >= 4 && privateFields.includes('audience'),
   `model.ts declares ${collabFields.length} collab fields, ${privateFields.length} of them private (${privateFields.join(', ')})`)
 
 const stripper = body('stripCollabSecrets')
