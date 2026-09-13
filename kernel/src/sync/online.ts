@@ -263,6 +263,10 @@ export class OnlineTransport implements Transport {
   ) {
     this.docId = docId
     this.writeReadyP = new Promise<void>((r) => { this.resolveWriteReady = r })
+    // Known before init's async work: an audience socket is a chain whose
+    // invite the owner signed with role 'audience'. Set here so startShow and
+    // the send guards see it immediately.
+    this.audienceMode = auth?.kind === 'chain' && auth.invite.role === 'audience'
     this.init(room)
   }
 
@@ -310,6 +314,9 @@ export class OnlineTransport implements Transport {
    *  The relay drops anything else it sent, but a client that does not send it
    *  in the first place cannot leak presence or an op it should not have. */
   private audienceMode = false
+  /** True when this transport is an audience socket — receive-only. The session
+   *  refuses startShow on it, and every show sender below no-ops. */
+  get audience(): boolean { return this.audienceMode }
 
   private async init(room: string) {
     const raw = b64u.dec(this.keyB64)
@@ -350,8 +357,7 @@ export class OnlineTransport implements Transport {
       const dg = await signText(iv.priv, `dlg.${id.pub}`)
       // An audience member connects on the audience path: ivr=audience (which
       // the owner signed into the invite), no bt (it never proves, never gets a
-      // ticket), and receive-only. Everything else on the chain is identical.
-      this.audienceMode = iv.role === 'audience'
+      // ticket), and receive-only. audienceMode was set in the constructor.
       const bt = this.audienceMode ? '' : '&bt=1'
       this.url = `${room}?tok=${tok}${bt}&w=${id.pub}&o=${a.owner}` +
         `&ivp=${iv.pub}&ivr=${iv.role}&ive=${iv.exp ?? 0}&ivs=${iv.sig}&dg=${dg}`
@@ -782,6 +788,7 @@ export class OnlineTransport implements Transport {
 
   /** Install (or clear) the show key. Raw AES-GCM key, base64url. */
   async setShowKey(rawB64: string | null): Promise<void> {
+    if (this.audienceMode) return
     this.showKey = rawB64
       ? await crypto.subtle.importKey('raw', b64u.dec(rawB64) as BufferSource, 'AES-GCM', false, ['encrypt'])
       : null
@@ -792,6 +799,7 @@ export class OnlineTransport implements Transport {
    *  the resend log — a dropped aud batch is recovered by the next audsnap, not
    *  by replay. Silent no-op if there is no show key or the socket is gone. */
   async sendAud(ops: Op[]): Promise<void> {
+    if (this.audienceMode) return
     const enc = await this.encrypt(JSON.stringify({ t: 'ops', a: 'show', ops }), this.showKey)
     if (!enc || !this.ws) return
     try { this.ws.send(JSON.stringify({ s: 'aud', i: enc.i, d: enc.d })) } catch { /* gone */ }
@@ -799,6 +807,7 @@ export class OnlineTransport implements Transport {
 
   /** The whole (already app-projected) document to the audience, under Ke. */
   async sendAudSnap(doc: SyncDoc, state: SyncStateJSON): Promise<void> {
+    if (this.audienceMode) return
     const enc = await this.encrypt(JSON.stringify({ doc, state }), this.showKey)
     if (!enc || !this.ws) return
     try { this.ws.send(JSON.stringify({ ctl: 'audsnap', i: enc.i, d: enc.d })) } catch { /* gone */ }
@@ -809,7 +818,7 @@ export class OnlineTransport implements Transport {
    *  room-stream signature cannot be replayed as the audience's); laser is
    *  unsigned. The relay checks all of this against the socket's proven key. */
   async sendVerb(kind: 'live' | 'end' | 'nav' | 'black' | 'laser', payload?: unknown): Promise<void> {
-    if (!this.ws) return
+    if (this.audienceMode || !this.ws) return
     try {
       if (kind === 'live' || kind === 'end') {
         const g = this.signKey ? await signWith(this.signKey, kind) : undefined

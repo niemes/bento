@@ -247,6 +247,22 @@ for (const [name, Transport] of [['kernel', KernelTransport], ['dash', DashTrans
   await tick()
   ok(ws.sent.length === before, 'but nothing the session sends leaves an AUDIENCE socket')
 
+  // the SHOW senders are guarded too, not just send(). Security probed exactly
+  // this: on an audience transport, setShowKey + the three senders put five
+  // frames (live/nav/laser/aud/audsnap) on the wire. Unreachable from the
+  // shipped boot and the relay drops them, but "not sending is the guarantee"
+  // must hold for all four senders, not one of four.
+  ok(tr.audience === true, 'the transport reports itself as an audience socket')
+  await tr.setShowKey(keyB64)
+  const b2 = ws.sent.length
+  await tr.sendVerb('live')
+  await tr.sendVerb('nav', { id: 's1' })
+  await tr.sendVerb('laser', { x: 1, y: 2 })
+  await tr.sendAud([{ a: 'p', s: 1, l: 1, op: 'set', sl: 's1', el: 's1x', k: 'x', v: 1 } as never])
+  await tr.sendAudSnap({ docId: 'd' } as never, { v: 2 } as never)
+  await tick()
+  ok(ws.sent.length === b2, 'an audience transport puts NO show frame on the wire either (all four senders guarded)')
+
   // an aud op frame (sealed under the show key = this.key) applies via onShowOps
   ws.deliver({ s: 'aud', ...(await seal({ t: 'ops', a: 'pres', ops: [{ a: 'pres', s: 1, l: 1, op: 'set', sl: 's1', el: 's1x', k: 'x', v: 1 }] })) })
   await tick()
