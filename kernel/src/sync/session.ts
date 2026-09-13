@@ -239,8 +239,11 @@ export interface ShowConfig {
   showKey: string
   /** null = this op is not for the audience (dropped from the aud stream) */
   projectOp(op: Op): Op | null
-  /** the projected document + sync state to seal as an audsnap */
-  snapshot(): { doc: SyncDoc; state: SyncStateJSON }
+  /** the projected document ONLY. The session builds the sync state itself
+   *  (freshAudState) — an adopt of this doc, so no stash or text history leaks
+   *  past the projection. The app must NOT supply a state; there is nowhere it
+   *  could get a safe one. */
+  snapshot(): { doc: SyncDoc }
 }
 
 /**
